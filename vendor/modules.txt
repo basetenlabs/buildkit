@@ -306,7 +306,7 @@ github.com/containerd/containerd/api/types/runc/options
 github.com/containerd/containerd/api/types/runtimeoptions/v1
 github.com/containerd/containerd/api/types/task
 github.com/containerd/containerd/api/types/transfer
-# github.com/containerd/containerd/v2 v2.0.5
+# github.com/containerd/containerd/v2 v2.0.7
 ## explicit; go 1.23.0
 github.com/containerd/containerd/v2/client
 github.com/containerd/containerd/v2/core/containers
@@ -939,7 +939,7 @@ go.opentelemetry.io/proto/otlp/common/v1
 go.opentelemetry.io/proto/otlp/metrics/v1
 go.opentelemetry.io/proto/otlp/resource/v1
 go.opentelemetry.io/proto/otlp/trace/v1
-# golang.org/x/crypto v0.37.0
+# golang.org/x/crypto v0.40.0
 ## explicit; go 1.23.0
 golang.org/x/crypto/blowfish
 golang.org/x/crypto/chacha20
@@ -952,17 +952,16 @@ golang.org/x/crypto/pkcs12/internal/rc2
 golang.org/x/crypto/ssh
 golang.org/x/crypto/ssh/agent
 golang.org/x/crypto/ssh/internal/bcrypt_pbkdf
-# golang.org/x/exp v0.0.0-20250408133849-7e4ce0ab07d0
+# golang.org/x/exp v0.0.0-20250711185948-6ae5c78190dc
 ## explicit; go 1.23.0
 golang.org/x/exp/trace
-golang.org/x/exp/trace/internal/event
-golang.org/x/exp/trace/internal/event/go122
-golang.org/x/exp/trace/internal/oldtrace
+golang.org/x/exp/trace/internal/tracev1
+golang.org/x/exp/trace/internal/tracev2
 golang.org/x/exp/trace/internal/version
-# golang.org/x/mod v0.24.0
+# golang.org/x/mod v0.26.0
 ## explicit; go 1.23.0
 golang.org/x/mod/semver
-# golang.org/x/net v0.39.0
+# golang.org/x/net v0.42.0
 ## explicit; go 1.23.0
 golang.org/x/net/http/httpguts
 golang.org/x/net/http2
@@ -971,12 +970,12 @@ golang.org/x/net/idna
 golang.org/x/net/internal/httpcommon
 golang.org/x/net/internal/timeseries
 golang.org/x/net/trace
-# golang.org/x/sync v0.13.0
+# golang.org/x/sync v0.16.0
 ## explicit; go 1.23.0
 golang.org/x/sync/errgroup
 golang.org/x/sync/semaphore
 golang.org/x/sync/singleflight
-# golang.org/x/sys v0.32.0
+# golang.org/x/sys v0.34.0
 ## explicit; go 1.23.0
 golang.org/x/sys/cpu
 golang.org/x/sys/unix
@@ -984,13 +983,13 @@ golang.org/x/sys/windows
 golang.org/x/sys/windows/registry
 golang.org/x/sys/windows/svc
 golang.org/x/sys/windows/svc/mgr
-# golang.org/x/text v0.24.0
+# golang.org/x/text v0.27.0
 ## explicit; go 1.23.0
 golang.org/x/text/secure/bidirule
 golang.org/x/text/transform
 golang.org/x/text/unicode/bidi
 golang.org/x/text/unicode/norm
-# golang.org/x/time v0.11.0
+# golang.org/x/time v0.12.0
 ## explicit; go 1.23.0
 golang.org/x/time/rate
 # google.golang.org/genproto/googleapis/api v0.0.0-20241021214115-324edc3d5d38

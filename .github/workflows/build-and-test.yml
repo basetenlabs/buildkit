@@ -1,6 +1,9 @@
-name: Post-Merge
+name: Build & Test
 
 on:
+  pull_request:
+    branches:
+      - v0.22-base
   push:
     branches:
       - v0.22-base
@@ -27,6 +30,12 @@ on:
         type: boolean
         default: false
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Cancel superseded PR runs; let push/merge runs finish (each merge must
+  # complete its build-and-push).
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
   checks: write
@@ -52,7 +61,9 @@ env:
 jobs:
   integration-tests:
     name: Integration Tests
-    if: ${{ !inputs.skip_integration_tests }}
+    # Runs on PRs, push (post-merge), and manual dispatch. Skipped for PRs from
+    # forks, which don't get the DockerHub/registry secrets this job needs.
+    if: ${{ !inputs.skip_integration_tests && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -149,7 +160,8 @@ jobs:
 
   build-and-push:
     name: Build & Push Image
-    if: ${{ !inputs.skip_build }}
+    # Post-merge / manual only — never push images from a PR build.
+    if: ${{ github.event_name != 'pull_request' && !inputs.skip_build }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4

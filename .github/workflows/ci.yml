@@ -27,7 +27,10 @@ jobs:
           cache: false
       - uses: golangci/golangci-lint-action@v7
         with:
-          version: latest
+          # Pin to the version upstream moby/buildkit v0.22 uses
+          # (hack/dockerfiles/lint.Dockerfile: GOLANGCI_LINT_VERSION=v2.1.5).
+          # `latest` drifts and runs newer/stricter linters against unchanged code.
+          version: v2.1.5
           args: --modules-download-mode=vendor
           only-new-issues: true
 

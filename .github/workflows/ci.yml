@@ -27,10 +27,14 @@ jobs:
           cache: false
       - uses: golangci/golangci-lint-action@v7
         with:
-          # Pin to the version upstream moby/buildkit v0.22 uses
-          # (hack/dockerfiles/lint.Dockerfile: GOLANGCI_LINT_VERSION=v2.1.5).
-          # `latest` drifts and runs newer/stricter linters against unchanged code.
+          # Mirror upstream moby/buildkit: build golangci-lint from source with our
+          # Go toolchain (install-mode: goinstall) instead of the pre-built release
+          # binary. A pre-built binary is compiled with its release's Go (v2.1.5 ->
+          # go1.24) and can't analyze our Go 1.25 code; building from source with
+          # GO_VERSION makes the pinned version compatible. Version matches upstream
+          # v0.22 (hack/dockerfiles/lint.Dockerfile: GOLANGCI_LINT_VERSION=v2.1.5).
           version: v2.1.5
+          install-mode: goinstall
           args: --modules-download-mode=vendor
           only-new-issues: true
 

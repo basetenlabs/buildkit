@@ -53,6 +53,9 @@ var (
 		{CAP_PASSTHROUGH, "PASSTHROUGH"},
 		{CAP_NO_EXPORT_SUPPORT, "NO_EXPORT_SUPPORT"},
 		{CAP_HAS_RESEND, "HAS_RESEND"},
+		{CAP_ALLOW_IDMAP, "ALLOW_IDMAP"},
+		{CAP_OVER_IO_URING, "IO_URING"},
+		{CAP_REQUEST_TIMEOUT, "REQUEST_TIMEOUT"},
 	})
 	releaseFlagNames = newFlagNames([]flagNameEntry{
 		{RELEASE_FLUSH, "FLUSH"},
@@ -81,6 +84,12 @@ var (
 		{FOPEN_PARALLEL_DIRECT_WRITES, "PARALLEL_DIRECT_WRITES"},
 		{FOPEN_PASSTHROUGH, "PASSTHROUGH"},
 	})
+	ioctlFlagNames = newFlagNames([]flagNameEntry{
+		{IOCTL_COMPAT, "COMPAT"},
+		{IOCTL_UNRESTRICTED, "UNRESTRICTED"},
+		{IOCTL_RETRY, "RETRY"},
+		{IOCTL_DIR, "DIR"},
+	})
 	accessFlagName = newFlagNames([]flagNameEntry{
 		{X_OK, "x"},
 		{W_OK, "w"},
@@ -88,6 +97,11 @@ var (
 	})
 	getAttrFlagNames = newFlagNames([]flagNameEntry{
 		{FUSE_GETATTR_FH, "FH"},
+	})
+	renameFlagNames = newFlagNames([]flagNameEntry{
+		{1, "NOREPLACE"},
+		{2, "EXCHANGE"},
+		{4, "WHITEOUT"},
 	})
 )
 
@@ -161,7 +175,7 @@ func (in *_BatchForgetIn) string() string {
 }
 
 func (in *MkdirIn) string() string {
-	return fmt.Sprintf("{0%o (0%o)}", in.Mode, in.Umask)
+	return fmt.Sprintf("{0%o (mask 0%o)}", in.Mode, in.Umask)
 }
 
 func (in *Rename1In) string() string {
@@ -169,7 +183,7 @@ func (in *Rename1In) string() string {
 }
 
 func (in *RenameIn) string() string {
-	return fmt.Sprintf("{i%d %x}", in.Newdir, in.Flags)
+	return fmt.Sprintf("{i%d %s}", in.Newdir, flagString(renameFlagNames, int64(in.Flags), "0"))
 }
 
 func (in *SetAttrIn) string() string {
@@ -313,6 +327,10 @@ func (i *NotifyRetrieveIn) string() string {
 	return fmt.Sprintf("{[%d +%d)}", i.Offset, i.Size)
 }
 
+func (o *NotifyPruneOut) string() string {
+	return fmt.Sprintf("{%d}", o.Count)
+}
+
 func (f *FallocateIn) string() string {
 	return fmt.Sprintf("{Fh %d [%d +%d) mod 0%o}",
 		f.Fh, f.Offset, f.Length, f.Mode)
@@ -384,4 +402,18 @@ func (a *Attr) string() string {
 
 func (m *BackingMap) string() string {
 	return fmt.Sprintf("{fd %d, flags 0x%x}", m.Fd, m.Flags)
+}
+
+func (o *IoctlIn) string() string {
+	return fmt.Sprintf("{Fh %d Flags %s Cmd 0x%x Arg 0x%x, insz %d outsz %d}",
+		o.Fh,
+		flagString(ioctlFlagNames, int64(o.Flags), ""),
+		o.Cmd, o.Arg, o.InSize, o.OutSize)
+}
+
+func (o *IoctlOut) string() string {
+	return fmt.Sprintf("{Result %d Flags %s Iovs %d/%d",
+		o.Result,
+		flagString(ioctlFlagNames, int64(o.Flags), ""),
+		o.InIovs, o.OutIovs)
 }

@@ -1,0 +1,90 @@
+http_cache_type = ''
+filesystem_cache_type = ''
+resolve_result_entry = 0
+debug = false
+disable_verification = false
+max_concurrency = 100
+no_prometheus = false
+mount_timeout_sec = 30
+fuse_metrics_emit_wait_duration_sec = 60
+metrics_address = ''
+metrics_network = 'tcp'
+debug_address = ''
+metadata_store = 'db'
+skip_check_snapshotter_supported = false
+
+[http]
+  DialTimeoutMsec = 3000
+  ResponseHeaderTimeoutMsec = 3000
+  RequestTimeoutMsec = 300000
+  MaxRetries = 8
+  MinWaitMsec = 30
+  MaxWaitMsec = 300000
+
+[blob]
+  valid_interval = 60
+  fetching_timeout_sec = 300
+  max_retries = 8
+  min_wait_msec = 30
+  max_wait_msec = 300000
+  check_always = false
+  force_single_range_mode = false
+  max_span_verification_retries = 0
+
+[directory_cache]
+  max_lru_cache_entry = 0
+  max_cache_fds = 0
+  sync_add = false
+  direct = true
+
+[fuse]
+  attr_timeout = 1
+  entry_timeout = 1
+  negative_timeout = 1
+  log_fuse_operations = false
+
+[background_fetch]
+  disable = false
+  silence_period_msec = 30000
+  fetch_period_msec = 500
+  max_queue_size = 100
+  emit_metric_period_sec = 10
+
+[content_store]
+  type = 'soci'
+  containerd_address = '/run/containerd/containerd.sock'
+
+[prefetch]
+  enable = false
+  max_concurrency = 0
+
+[pull_modes]
+  [pull_modes.soci_v1]
+    enable = false
+
+  [pull_modes.soci_v2]
+    enable = true
+
+  [pull_modes.parallel_pull_unpack]
+    max_concurrent_downloads = -1
+    max_concurrent_downloads_per_image = 3
+    concurrent_download_chunk_size = ''
+    max_concurrent_unpacks = -1
+    max_concurrent_unpacks_per_image = 1
+    discard_unpacked_layers = false
+    enable = false
+    experimental_parallel_pull_as_fallback = false
+
+[kubeconfig_keychain]
+  enable_keychain = false
+  kubeconfig_path = ''
+
+[cri_keychain]
+  enable_keychain = false
+  image_service_path = '/run/containerd/containerd.sock'
+
+[resolver]
+
+[snapshotter]
+  min_layer_size = 0
+  allow_invalid_mounts_on_restart = false

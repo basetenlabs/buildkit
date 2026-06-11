@@ -366,12 +366,17 @@ func (n *Inode) ForgetPersistent() {
 // should be standard mode argument (eg. S_IFDIR). The inode number in
 // id.Ino argument is used to implement hard-links.  If it is given,
 // and another node with the same ID is known, the new inode may be
-// ignored, and the old one used instead.
+// ignored, and the old one used instead. If the parent inode
+// implements NodeWrapChilder, the returned Inode will have a
+// different InodeEmbedder from the one passed in.
 func (n *Inode) NewInode(ctx context.Context, node InodeEmbedder, id StableAttr) *Inode {
 	return n.newInode(ctx, node, id, false)
 }
 
 func (n *Inode) newInode(ctx context.Context, ops InodeEmbedder, id StableAttr, persistent bool) *Inode {
+	if wc, ok := n.ops.(NodeWrapChilder); ok {
+		ops = wc.WrapChild(ctx, ops)
+	}
 	return n.bridge.newInode(ctx, ops, id, persistent)
 }
 
@@ -725,7 +730,26 @@ retry:
 // tuple should be invalidated. On next access, a LOOKUP operation
 // will be started.
 func (n *Inode) NotifyEntry(name string) syscall.Errno {
+	if n.bridge.server == nil {
+		return syscall.ENOSYS
+	}
 	status := n.bridge.server.EntryNotify(n.nodeId, name)
+	return syscall.Errno(status)
+}
+
+// NotifyPrune instructs the kernel to forget the inodes passed as
+// argument. The kernel will issue FORGET requests as far as possible
+// in response.  If the receiver Inode must be forgotten too it must
+// be included in the argument separately.
+func (n *Inode) NotifyPrune(nodes []*Inode) syscall.Errno {
+	if n.bridge.server == nil {
+		return syscall.ENOSYS
+	}
+	ids := make([]uint64, 0, len(nodes))
+	for _, n := range nodes {
+		ids = append(ids, n.nodeId)
+	}
+	status := n.bridge.server.(*fuse.Server).PruneNotify(ids)
 	return syscall.Errno(status)
 }
 
@@ -733,25 +757,36 @@ func (n *Inode) NotifyEntry(name string) syscall.Errno {
 // from this directory as entry under the given name. It is equivalent
 // to NotifyEntry, but also sends an event to inotify watchers.
 func (n *Inode) NotifyDelete(name string, child *Inode) syscall.Errno {
+	if n.bridge.server == nil {
+		return syscall.ENOSYS
+	}
 	// XXX arg ordering?
 	return syscall.Errno(n.bridge.server.DeleteNotify(n.nodeId, child.nodeId, name))
-
 }
 
 // NotifyContent notifies the kernel that content under the given
 // inode should be flushed from buffers.
 func (n *Inode) NotifyContent(off, sz int64) syscall.Errno {
+	if n.bridge.server == nil {
+		return syscall.ENOSYS
+	}
 	// XXX how does this work for directories?
 	return syscall.Errno(n.bridge.server.InodeNotify(n.nodeId, off, sz))
 }
 
 // WriteCache stores data in the kernel cache.
 func (n *Inode) WriteCache(offset int64, data []byte) syscall.Errno {
+	if n.bridge.server == nil {
+		return syscall.ENOSYS
+	}
 	return syscall.Errno(n.bridge.server.InodeNotifyStoreCache(n.nodeId, offset, data))
 }
 
 // ReadCache reads data from the kernel cache.
 func (n *Inode) ReadCache(offset int64, dest []byte) (count int, errno syscall.Errno) {
+	if n.bridge.server == nil {
+		return 0, syscall.ENOSYS
+	}
 	c, s := n.bridge.server.InodeRetrieveCache(n.nodeId, offset, dest)
 	return c, syscall.Errno(s)
 }

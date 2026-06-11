@@ -60,11 +60,12 @@ const (
 	_OP_LSEEK           = uint32(46) // protocol version 24
 	_OP_COPY_FILE_RANGE = uint32(47) // protocol version 28.
 
-	_OP_SETUPMAPPING  = 48
-	_OP_REMOVEMAPPING = 49
-	_OP_SYNCFS        = 50
-	_OP_TMPFILE       = 51
-	_OP_STATX         = 52
+	_OP_SETUPMAPPING       = 48
+	_OP_REMOVEMAPPING      = 49
+	_OP_SYNCFS             = 50
+	_OP_TMPFILE            = 51
+	_OP_STATX              = 52
+	_OP_COPY_FILE_RANGE_64 = 53
 
 	// The following entries don't have to be compatible across Go-FUSE versions.
 	_OP_NOTIFY_INVAL_ENTRY    = uint32(100)
@@ -72,8 +73,9 @@ const (
 	_OP_NOTIFY_STORE_CACHE    = uint32(102)
 	_OP_NOTIFY_RETRIEVE_CACHE = uint32(103)
 	_OP_NOTIFY_DELETE         = uint32(104) // protocol version 18
+	_OP_NOTIFY_PRUNE          = uint32(105) // protocol version 45
 
-	_OPCODE_COUNT = uint32(105)
+	_OPCODE_COUNT = uint32(106)
 
 	// Constants from Linux kernel fs/fuse/fuse_i.h
 	// Default MaxPages value in all kernel versions
@@ -84,7 +86,7 @@ const (
 
 ////////////////////////////////////////////////////////////////
 
-func doInit(server *Server, req *request) {
+func doInit(server *protocolServer, req *request) {
 	input := (*InitIn)(req.inData())
 	if input.Major != _FUSE_KERNEL_VERSION {
 		log.Printf("Major versions does not match. Given %d, want %d\n", input.Major, _FUSE_KERNEL_VERSION)
@@ -98,10 +100,10 @@ func doInit(server *Server, req *request) {
 	}
 
 	kernelFlags := input.Flags64()
-
 	server.kernelSettings = *input
 	kernelFlags &= (CAP_ASYNC_READ | CAP_BIG_WRITES | CAP_FILE_OPS |
-		CAP_READDIRPLUS | CAP_NO_OPEN_SUPPORT | CAP_PARALLEL_DIROPS | CAP_MAX_PAGES | CAP_RENAME_SWAP | CAP_PASSTHROUGH)
+		CAP_READDIRPLUS | CAP_NO_OPEN_SUPPORT | CAP_PARALLEL_DIROPS | CAP_MAX_PAGES | CAP_RENAME_SWAP | CAP_PASSTHROUGH | CAP_ALLOW_IDMAP |
+		server.opts.ExtraCapabilities)
 
 	if server.opts.EnableLocks {
 		kernelFlags |= CAP_FLOCK_LOCKS | CAP_POSIX_LOCKS
@@ -112,26 +114,15 @@ func doInit(server *Server, req *request) {
 	if server.opts.EnableAcl {
 		kernelFlags |= CAP_POSIX_ACL
 	}
-	if server.opts.SyncRead {
-		// Clear CAP_ASYNC_READ
-		kernelFlags &= ^uint64(CAP_ASYNC_READ)
-	}
-	if server.opts.DisableReadDirPlus {
-		// Clear CAP_READDIRPLUS
-		kernelFlags &= ^uint64(CAP_READDIRPLUS)
-	}
 
-	dataCacheMode := kernelFlags & CAP_AUTO_INVAL_DATA
 	if server.opts.ExplicitDataCacheControl {
 		// we don't want CAP_AUTO_INVAL_DATA even if we cannot go into fully explicit mode
-		dataCacheMode = 0
-
-		explicit := kernelFlags & CAP_EXPLICIT_INVAL_DATA
-		if explicit != 0 {
-			dataCacheMode = explicit
-		}
+		kernelFlags |= input.Flags64() & CAP_EXPLICIT_INVAL_DATA
+	} else {
+		kernelFlags |= input.Flags64() & CAP_AUTO_INVAL_DATA
 	}
-	kernelFlags |= dataCacheMode
+
+	kernelFlags = kernelFlags &^ server.opts.DisabledCapabilities
 
 	// maxPages is the maximum request size we want the kernel to use, in units of
 	// memory pages (usually 4kiB). Linux v4.19 and older ignore this and always use
@@ -147,7 +138,7 @@ func doInit(server *Server, req *request) {
 		CongestionThreshold: uint16(server.opts.MaxBackground * 3 / 4),
 		MaxBackground:       uint16(server.opts.MaxBackground),
 		MaxPages:            uint16(maxPages),
-		MaxStackDepth:       1,
+		MaxStackDepth:       uint32(server.opts.MaxStackDepth),
 	}
 	out.setFlags(kernelFlags)
 	if server.opts.MaxReadAhead != 0 && uint32(server.opts.MaxReadAhead) < out.MaxReadAhead {
@@ -160,7 +151,7 @@ func doInit(server *Server, req *request) {
 	req.status = OK
 }
 
-func doOpen(server *Server, req *request) {
+func doOpen(server *protocolServer, req *request) {
 	out := (*OpenOut)(req.outData())
 	status := server.fileSystem.Open(req.cancel, (*OpenIn)(req.inData()), out)
 	req.status = status
@@ -169,13 +160,13 @@ func doOpen(server *Server, req *request) {
 	}
 }
 
-func doCreate(server *Server, req *request) {
+func doCreate(server *protocolServer, req *request) {
 	out := (*CreateOut)(req.outData())
 	status := server.fileSystem.Create(req.cancel, (*CreateIn)(req.inData()), req.filename(), out)
 	req.status = status
 }
 
-func doReadDir(server *Server, req *request) {
+func doReadDir(server *protocolServer, req *request) {
 	in := (*ReadIn)(req.inData())
 	out := NewDirEntryList(req.outPayload, uint64(in.Offset))
 	code := server.fileSystem.ReadDir(req.cancel, in, out)
@@ -183,7 +174,7 @@ func doReadDir(server *Server, req *request) {
 	req.status = code
 }
 
-func doReadDirPlus(server *Server, req *request) {
+func doReadDirPlus(server *protocolServer, req *request) {
 	in := (*ReadIn)(req.inData())
 	out := NewDirEntryList(req.outPayload, uint64(in.Offset))
 
@@ -192,25 +183,25 @@ func doReadDirPlus(server *Server, req *request) {
 	req.status = code
 }
 
-func doOpenDir(server *Server, req *request) {
+func doOpenDir(server *protocolServer, req *request) {
 	out := (*OpenOut)(req.outData())
 	status := server.fileSystem.OpenDir(req.cancel, (*OpenIn)(req.inData()), out)
 	req.status = status
 }
 
-func doSetattr(server *Server, req *request) {
+func doSetattr(server *protocolServer, req *request) {
 	out := (*AttrOut)(req.outData())
 	req.status = server.fileSystem.SetAttr(req.cancel, (*SetAttrIn)(req.inData()), out)
 }
 
-func doWrite(server *Server, req *request) {
+func doWrite(server *protocolServer, req *request) {
 	n, status := server.fileSystem.Write(req.cancel, (*WriteIn)(req.inData()), req.inPayload)
 	o := (*WriteOut)(req.outData())
 	o.Size = n
 	req.status = status
 }
 
-func doNotifyReply(server *Server, req *request) {
+func doNotifyReply(server *protocolServer, req *request) {
 	reply := (*NotifyRetrieveIn)(req.inData())
 	server.retrieveMu.Lock()
 	reading := server.retrieveTab[reply.Unique]
@@ -252,7 +243,7 @@ const _SECURITY_CAPABILITY = "security.capability"
 const _SECURITY_ACL = "system.posix_acl_access"
 const _SECURITY_ACL_DEFAULT = "system.posix_acl_default"
 
-func doGetXAttr(server *Server, req *request) {
+func doGetXAttr(server *protocolServer, req *request) {
 	if server.opts.DisableXAttrs {
 		req.status = ENOSYS
 		return
@@ -268,8 +259,6 @@ func doGetXAttr(server *Server, req *request) {
 	}
 
 	input := (*GetXAttrIn)(req.inData())
-	out := (*GetXAttrOut)(req.outData())
-
 	var n uint32
 	switch req.inHeader().Opcode {
 	case _OP_GETXATTR:
@@ -280,9 +269,13 @@ func doGetXAttr(server *Server, req *request) {
 		req.status = ENOSYS
 	}
 
-	if input.Size == 0 && req.status == ERANGE {
-		// For input.size==0, returning ERANGE is an error.
-		req.status = OK
+	if input.Size == 0 {
+		if req.status == ERANGE {
+			// For input.size==0, returning ERANGE is an error.
+			req.status = OK
+		}
+
+		out := (*GetXAttrOut)(req.outData())
 		out.Size = n
 	} else if req.status.Ok() {
 		// ListXAttr called with an empty buffer returns the current size of
@@ -290,33 +283,36 @@ func doGetXAttr(server *Server, req *request) {
 		if len(req.outPayload) > 0 {
 			req.outPayload = req.outPayload[:n]
 		}
-		out.Size = n
 	} else {
 		req.outPayload = req.outPayload[:0]
 	}
 }
 
-func doGetAttr(server *Server, req *request) {
+func doGetAttr(server *protocolServer, req *request) {
 	out := (*AttrOut)(req.outData())
 	s := server.fileSystem.GetAttr(req.cancel, (*GetAttrIn)(req.inData()), out)
 	req.status = s
 }
 
 // doForget - forget one NodeId
-func doForget(server *Server, req *request) {
+func doForget(server *protocolServer, req *request) {
 	if !server.opts.RememberInodes {
 		server.fileSystem.Forget(req.inHeader().NodeId, (*ForgetIn)(req.inData()).Nlookup)
 	}
 }
 
 // doBatchForget - forget a list of NodeIds
-func doBatchForget(server *Server, req *request) {
+func doBatchForget(server *protocolServer, req *request) {
 	in := (*_BatchForgetIn)(req.inData())
-	wantBytes := uintptr(in.Count) * unsafe.Sizeof(_ForgetOne{})
-	if uintptr(len(req.inPayload)) < wantBytes {
+	gotCount := len(req.inPayload) / int(unsafe.Sizeof(_ForgetOne{}))
+	if int(in.Count) > gotCount {
 		// We have no return value to complain, so log an error.
-		server.opts.Logger.Printf("Too few bytes for batch forget. Got %d bytes, want %d (%d entries)",
-			len(req.inPayload), wantBytes, in.Count)
+		server.opts.Logger.Printf("Too few bytes for batch forget. Got %d bytes enough for %d entries (want %d entries)",
+			len(req.inPayload), gotCount, in.Count)
+	}
+	in.Count = uint32(gotCount)
+	if in.Count == 0 {
+		return
 	}
 
 	forgets := unsafe.Slice((*_ForgetOne)(unsafe.Pointer(&req.inPayload[0])), in.Count)
@@ -332,90 +328,89 @@ func doBatchForget(server *Server, req *request) {
 	}
 }
 
-func doReadlink(server *Server, req *request) {
+func doReadlink(server *protocolServer, req *request) {
 	req.outPayload, req.status = server.fileSystem.Readlink(req.cancel, req.inHeader())
 }
 
-func doLookup(server *Server, req *request) {
+func doLookup(server *protocolServer, req *request) {
 	out := (*EntryOut)(req.outData())
 	req.status = server.fileSystem.Lookup(req.cancel, req.inHeader(), req.filename(), out)
 }
 
-func doMknod(server *Server, req *request) {
+func doMknod(server *protocolServer, req *request) {
 	out := (*EntryOut)(req.outData())
 
 	req.status = server.fileSystem.Mknod(req.cancel, (*MknodIn)(req.inData()), req.filename(), out)
 }
 
-func doMkdir(server *Server, req *request) {
+func doMkdir(server *protocolServer, req *request) {
 	out := (*EntryOut)(req.outData())
 	req.status = server.fileSystem.Mkdir(req.cancel, (*MkdirIn)(req.inData()), req.filename(), out)
 }
 
-func doUnlink(server *Server, req *request) {
+func doUnlink(server *protocolServer, req *request) {
 	req.status = server.fileSystem.Unlink(req.cancel, req.inHeader(), req.filename())
 }
 
-func doRmdir(server *Server, req *request) {
+func doRmdir(server *protocolServer, req *request) {
 	req.status = server.fileSystem.Rmdir(req.cancel, req.inHeader(), req.filename())
 }
 
-func doLink(server *Server, req *request) {
+func doLink(server *protocolServer, req *request) {
 	out := (*EntryOut)(req.outData())
 	req.status = server.fileSystem.Link(req.cancel, (*LinkIn)(req.inData()), req.filename(), out)
 }
 
-func doRead(server *Server, req *request) {
+func doRead(server *protocolServer, req *request) {
 	in := (*ReadIn)(req.inData())
 	req.readResult, req.status = server.fileSystem.Read(req.cancel, in, req.outPayload)
-	if fd, ok := req.readResult.(*readResultFd); ok {
-		req.fdData = fd
-	} else if req.readResult != nil && req.status.Ok() {
-		req.outPayload, req.status = req.readResult.Bytes(req.outPayload)
-	}
 }
 
-func doFlush(server *Server, req *request) {
+func doFlush(server *protocolServer, req *request) {
 	req.status = server.fileSystem.Flush(req.cancel, (*FlushIn)(req.inData()))
 }
 
-func doRelease(server *Server, req *request) {
+func doRelease(server *protocolServer, req *request) {
 	server.fileSystem.Release(req.cancel, (*ReleaseIn)(req.inData()))
 }
 
-func doFsync(server *Server, req *request) {
+func doFsync(server *protocolServer, req *request) {
 	req.status = server.fileSystem.Fsync(req.cancel, (*FsyncIn)(req.inData()))
 }
 
-func doReleaseDir(server *Server, req *request) {
+func doReleaseDir(server *protocolServer, req *request) {
 	server.fileSystem.ReleaseDir((*ReleaseIn)(req.inData()))
 }
 
-func doFsyncDir(server *Server, req *request) {
+func doFsyncDir(server *protocolServer, req *request) {
 	req.status = server.fileSystem.FsyncDir(req.cancel, (*FsyncIn)(req.inData()))
 }
 
-func doSetXAttr(server *Server, req *request) {
+func doSetXAttr(server *protocolServer, req *request) {
 	i := bytes.IndexByte(req.inPayload, 0)
+	if i < 0 {
+		req.status = EINVAL
+		return
+	}
 	req.status = server.fileSystem.SetXAttr(req.cancel, (*SetXAttrIn)(req.inData()), string(req.inPayload[:i]), req.inPayload[i+1:])
 }
 
-func doRemoveXAttr(server *Server, req *request) {
+func doRemoveXAttr(server *protocolServer, req *request) {
 	req.status = server.fileSystem.RemoveXAttr(req.cancel, req.inHeader(), req.filename())
 }
 
-func doAccess(server *Server, req *request) {
+func doAccess(server *protocolServer, req *request) {
 	req.status = server.fileSystem.Access(req.cancel, (*AccessIn)(req.inData()))
 }
 
-func doSymlink(server *Server, req *request) {
+func doSymlink(server *protocolServer, req *request) {
 	out := (*EntryOut)(req.outData())
 	n1, n2 := req.filenames()
 
 	req.status = server.fileSystem.Symlink(req.cancel, req.inHeader(), n2, n1, out)
 }
 
-func doRename(server *Server, req *request) {
+func doRename(server *protocolServer, req *request) {
 	if server.kernelSettings.supportsRenameSwap() {
 		doRename2(server, req)
 		return
@@ -429,12 +424,12 @@ func doRename(server *Server, req *request) {
 	req.status = server.fileSystem.Rename(req.cancel, &in, n1, n2)
 }
 
-func doRename2(server *Server, req *request) {
+func doRename2(server *protocolServer, req *request) {
 	n1, n2 := req.filenames()
 	req.status = server.fileSystem.Rename(req.cancel, (*RenameIn)(req.inData()), n1, n2)
 }
 
-func doStatFs(server *Server, req *request) {
+func doStatFs(server *protocolServer, req *request) {
 	out := (*StatfsOut)(req.outData())
 	req.status = server.fileSystem.StatFs(req.cancel, req.inHeader(), out)
 	if req.status == ENOSYS && runtime.GOOS == "darwin" {
@@ -445,63 +440,66 @@ func doStatFs(server *Server, req *request) {
 	}
 }
 
-func doIoctl(server *Server, req *request) {
-	req.status = Status(syscall.ENOTTY)
+func doIoctl(server *protocolServer, req *request) {
+	req.status = server.fileSystem.Ioctl(req.cancel, (*IoctlIn)(req.inData()), req.inPayload, (*IoctlOut)(req.outData()),
+		req.outPayload)
 }
 
-func doDestroy(server *Server, req *request) {
+func doDestroy(server *protocolServer, req *request) {
 	req.status = OK
 }
 
-func doFallocate(server *Server, req *request) {
+func doFallocate(server *protocolServer, req *request) {
 	req.status = server.fileSystem.Fallocate(req.cancel, (*FallocateIn)(req.inData()))
 }
 
-func doGetLk(server *Server, req *request) {
+func doGetLk(server *protocolServer, req *request) {
 	req.status = server.fileSystem.GetLk(req.cancel, (*LkIn)(req.inData()), (*LkOut)(req.outData()))
 }
 
-func doSetLk(server *Server, req *request) {
+func doSetLk(server *protocolServer, req *request) {
 	req.status = server.fileSystem.SetLk(req.cancel, (*LkIn)(req.inData()))
 }
 
-func doSetLkw(server *Server, req *request) {
+func doSetLkw(server *protocolServer, req *request) {
 	req.status = server.fileSystem.SetLkw(req.cancel, (*LkIn)(req.inData()))
 }
 
-func doLseek(server *Server, req *request) {
+func doLseek(server *protocolServer, req *request) {
 	in := (*LseekIn)(req.inData())
 	out := (*LseekOut)(req.outData())
 	req.status = server.fileSystem.Lseek(req.cancel, in, out)
 }
 
-func doCopyFileRange(server *Server, req *request) {
+func doCopyFileRange(server *protocolServer, req *request) {
 	in := (*CopyFileRangeIn)(req.inData())
 	out := (*WriteOut)(req.outData())
 
 	out.Size, req.status = server.fileSystem.CopyFileRange(req.cancel, in)
 }
 
-func doInterrupt(server *Server, req *request) {
+func doInterrupt(server *protocolServer, req *request) {
 	input := (*InterruptIn)(req.inData())
 	req.status = server.interruptRequest(input.Unique)
 }
 
 ////////////////////////////////////////////////////////////////
 
-type operationFunc func(*Server, *request)
+type operationFunc func(*protocolServer, *request)
 type castPointerFunc func(unsafe.Pointer) interface{}
 
 type operationHandler struct {
+	OpCode     int
 	Name       string
 	Func       operationFunc
 	InputSize  uintptr
 	OutputSize uintptr
 
-	InType      interface{}
-	OutType     interface{}
-	FileNames   int
-	FileNameOut bool
+	InType        interface{}
+	OutType       interface{}
+	FileNames     int
+	FileNameOut   bool
+	SuppressReply bool
 }
 
 var operationHandlers []*operationHandler
@@ -527,12 +525,18 @@ var maxInputSize uintptr
 func init() {
 	operationHandlers = make([]*operationHandler, _OPCODE_COUNT)
 	for i := range operationHandlers {
-		operationHandlers[i] = &operationHandler{Name: fmt.Sprintf("OPCODE-%d", i)}
+		operationHandlers[i] = &operationHandler{
+			OpCode: i,
+			Name:   fmt.Sprintf("OPCODE-%d", i),
+		}
 	}
 
 	fileOps := []uint32{_OP_READLINK, _OP_NOTIFY_INVAL_ENTRY, _OP_NOTIFY_DELETE}
 	for _, op := range fileOps {
 		operationHandlers[op].FileNameOut = true
+	}
+	for _, op := range []uint32{_OP_FORGET, _OP_BATCH_FORGET, _OP_NOTIFY_REPLY} {
+		operationHandlers[op].SuppressReply = true
 	}
 
 	for op, v := range map[uint32]string{
@@ -590,6 +594,7 @@ func init() {
 		_OP_REMOVEMAPPING:         "REMOVEMAPPING",
 		_OP_SYNCFS:                "SYNCFS",
 		_OP_TMPFILE:               "TMPFILE",
+		_OP_COPY_FILE_RANGE_64:    "COPY_FILE_RANGE_64",
 	} {
 		operationHandlers[op].Name = v
 	}
@@ -651,7 +656,7 @@ func init() {
 		_OP_GETLK:                 LkOut{},
 		_OP_GETXATTR:              GetXAttrOut{},
 		_OP_INIT:                  InitOut{},
-		_OP_IOCTL:                 _IoctlOut{},
+		_OP_IOCTL:                 IoctlOut{},
 		_OP_LINK:                  EntryOut{},
 		_OP_LISTXATTR:             GetXAttrOut{},
 		_OP_LOOKUP:                EntryOut{},
@@ -663,6 +668,7 @@ func init() {
 		_OP_NOTIFY_INVAL_INODE:    NotifyInvalInodeOut{},
 		_OP_NOTIFY_RETRIEVE_CACHE: NotifyRetrieveOut{},
 		_OP_NOTIFY_STORE_CACHE:    NotifyStoreOut{},
+		_OP_NOTIFY_PRUNE:          NotifyPruneOut{},
 		_OP_OPEN:                  OpenOut{},
 		_OP_OPENDIR:               OpenOut{},
 		_OP_POLL:                  _PollOut{},
@@ -670,6 +676,7 @@ func init() {
 		_OP_STATFS:                StatfsOut{},
 		_OP_SYMLINK:               EntryOut{},
 		_OP_WRITE:                 WriteOut{},
+		_OP_COPY_FILE_RANGE_64:    CopyFileRangeOut{},
 	} {
 		operationHandlers[op].OutType = f
 		operationHandlers[op].OutputSize = typSize(f)
@@ -677,43 +684,44 @@ func init() {
 
 	// Inputs.
 	for op, f := range map[uint32]interface{}{
-		_OP_ACCESS:          AccessIn{},
-		_OP_BATCH_FORGET:    _BatchForgetIn{},
-		_OP_BMAP:            _BmapIn{},
-		_OP_COPY_FILE_RANGE: CopyFileRangeIn{},
-		_OP_CREATE:          CreateIn{},
-		_OP_FALLOCATE:       FallocateIn{},
-		_OP_FLUSH:           FlushIn{},
-		_OP_FORGET:          ForgetIn{},
-		_OP_FSYNC:           FsyncIn{},
-		_OP_FSYNCDIR:        FsyncIn{},
-		_OP_GETATTR:         GetAttrIn{},
-		_OP_GETLK:           LkIn{},
-		_OP_GETXATTR:        GetXAttrIn{},
-		_OP_INIT:            InitIn{},
-		_OP_INTERRUPT:       InterruptIn{},
-		_OP_IOCTL:           _IoctlIn{},
-		_OP_LINK:            LinkIn{},
-		_OP_LISTXATTR:       GetXAttrIn{},
-		_OP_LSEEK:           LseekIn{},
-		_OP_MKDIR:           MkdirIn{},
-		_OP_MKNOD:           MknodIn{},
-		_OP_NOTIFY_REPLY:    NotifyRetrieveIn{},
-		_OP_OPEN:            OpenIn{},
-		_OP_OPENDIR:         OpenIn{},
-		_OP_POLL:            _PollIn{},
-		_OP_READ:            ReadIn{},
-		_OP_READDIR:         ReadIn{},
-		_OP_READDIRPLUS:     ReadIn{},
-		_OP_RELEASE:         ReleaseIn{},
-		_OP_RELEASEDIR:      ReleaseIn{},
-		_OP_RENAME2:         RenameIn{},
-		_OP_RENAME:          Rename1In{},
-		_OP_SETATTR:         SetAttrIn{},
-		_OP_SETLK:           LkIn{},
-		_OP_SETLKW:          LkIn{},
-		_OP_SETXATTR:        SetXAttrIn{},
-		_OP_WRITE:           WriteIn{},
+		_OP_ACCESS:             AccessIn{},
+		_OP_BATCH_FORGET:       _BatchForgetIn{},
+		_OP_BMAP:               _BmapIn{},
+		_OP_COPY_FILE_RANGE:    CopyFileRangeIn{},
+		_OP_CREATE:             CreateIn{},
+		_OP_FALLOCATE:          FallocateIn{},
+		_OP_FLUSH:              FlushIn{},
+		_OP_FORGET:             ForgetIn{},
+		_OP_FSYNC:              FsyncIn{},
+		_OP_FSYNCDIR:           FsyncIn{},
+		_OP_GETATTR:            GetAttrIn{},
+		_OP_GETLK:              LkIn{},
+		_OP_GETXATTR:           GetXAttrIn{},
+		_OP_INIT:               InitIn{},
+		_OP_INTERRUPT:          InterruptIn{},
+		_OP_IOCTL:              IoctlIn{},
+		_OP_LINK:               LinkIn{},
+		_OP_LISTXATTR:          GetXAttrIn{},
+		_OP_LSEEK:              LseekIn{},
+		_OP_MKDIR:              MkdirIn{},
+		_OP_MKNOD:              MknodIn{},
+		_OP_NOTIFY_REPLY:       NotifyRetrieveIn{},
+		_OP_OPEN:               OpenIn{},
+		_OP_OPENDIR:            OpenIn{},
+		_OP_POLL:               _PollIn{},
+		_OP_READ:               ReadIn{},
+		_OP_READDIR:            ReadIn{},
+		_OP_READDIRPLUS:        ReadIn{},
+		_OP_RELEASE:            ReleaseIn{},
+		_OP_RELEASEDIR:         ReleaseIn{},
+		_OP_RENAME2:            RenameIn{},
+		_OP_RENAME:             Rename1In{},
+		_OP_SETATTR:            SetAttrIn{},
+		_OP_SETLK:              LkIn{},
+		_OP_SETLKW:             LkIn{},
+		_OP_SETXATTR:           SetXAttrIn{},
+		_OP_WRITE:              WriteIn{},
+		_OP_COPY_FILE_RANGE_64: CopyFileRangeIn{},
 	} {
 		operationHandlers[op].InType = f
 		sz := typSize(f)
@@ -742,11 +750,14 @@ func init() {
 		operationHandlers[op].FileNames = count
 	}
 
+	checkFixedBufferSize()
+}
+
+func checkFixedBufferSize() {
 	var r requestAlloc
-	sizeOfOutHeader := unsafe.Sizeof(OutHeader{})
 	for code, h := range operationHandlers {
-		if h.OutputSize+sizeOfOutHeader > unsafe.Sizeof(r.outBuf) {
-			log.Panicf("request output buffer too small: code %v, sz %d + %d %v", code, h.OutputSize, sizeOfOutHeader, h)
+		if h.OutputSize > unsafe.Sizeof(r.outDataInline) {
+			log.Panicf("request output buffer too small: code %v, sz %d %v", code, h.OutputSize, h)
 		}
 	}
 }

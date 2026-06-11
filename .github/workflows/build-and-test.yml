@@ -86,7 +86,13 @@ jobs:
         uses: docker/bake-action@v6
         with:
           targets: integration-tests
+          # Build buildkitd with BUILDKITD_TAGS=soci (CGO_ENABLED=1 + static zlib, see
+          # the Dockerfile buildkitd stage) so the soci-tagged exporter is exercised by
+          # the same suite. The soci tag is purely additive — the rest of the daemon and
+          # all non-soci tests behave identically — so there's no separate SOCI job.
           set: |
+            *.args.BUILDKITD_TAGS=soci
+            *.args.CGO_ENABLED=1
             *.cache-from=type=gha,scope=integration-tests
             *.cache-to=type=gha,scope=integration-tests,repository=${{ github.repository }},ghtoken=${{ secrets.GITHUB_TOKEN }}
       - name: Configure test scope
@@ -96,22 +102,27 @@ jobs:
           # We don't ship llb.Diff/llb.Merge in production; skipping is fine.
           # See PR #28 commentary for details.
           skip='--skip=/^(TestDiffDeleteDirs|TestDiffDeleteFiles|TestDiffOpaqueDirs|TestDiffCombinedSingleLayer)$/'
+          # --tags=soci compiles the soci-tagged tests (client_soci_test.go) into the
+          # suite; the daemon above is built with the matching tag. The tag is additive,
+          # so it's safe for every scope (packages with no soci files just ignore it).
+          # In the oci-only scopes the --run=//worker=oci$ filter keeps TestBuildExportSOCI
+          # on the plain OCI worker — SOCI's target worker.
           case "$scope" in
             full)
               echo "TESTPKGS=./client ./cmd/buildctl ./solver ./frontend" >> "$GITHUB_ENV"
-              echo "TESTFLAGS=-v --parallel=6 --timeout=30m $skip" >> "$GITHUB_ENV"
+              echo "TESTFLAGS=-v --parallel=6 --timeout=30m --tags=soci $skip" >> "$GITHUB_ENV"
               ;;
             solver)
               echo "TESTPKGS=./solver" >> "$GITHUB_ENV"
-              echo "TESTFLAGS=-v --parallel=6 --timeout=30m --run=//worker=oci\$ $skip" >> "$GITHUB_ENV"
+              echo "TESTFLAGS=-v --parallel=6 --timeout=30m --tags=soci --run=//worker=oci\$ $skip" >> "$GITHUB_ENV"
               ;;
             client)
               echo "TESTPKGS=./client" >> "$GITHUB_ENV"
-              echo "TESTFLAGS=-v --parallel=6 --timeout=30m --run=//worker=oci\$ $skip" >> "$GITHUB_ENV"
+              echo "TESTFLAGS=-v --parallel=6 --timeout=30m --tags=soci --run=//worker=oci\$ $skip" >> "$GITHUB_ENV"
               ;;
             *)
               echo "TESTPKGS=./solver ./client" >> "$GITHUB_ENV"
-              echo "TESTFLAGS=-v --parallel=6 --timeout=30m --run=//worker=oci\$ $skip" >> "$GITHUB_ENV"
+              echo "TESTFLAGS=-v --parallel=6 --timeout=30m --tags=soci --run=//worker=oci\$ $skip" >> "$GITHUB_ENV"
               ;;
           esac
           echo "scope=$scope"

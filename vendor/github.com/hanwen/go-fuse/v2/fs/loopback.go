@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/hanwen/go-fuse/v2/internal/openat"
 	"github.com/hanwen/go-fuse/v2/internal/renameat"
 	"golang.org/x/sys/unix"
 )
@@ -29,6 +30,8 @@ type LoopbackRoot struct {
 	// NewNode returns a new InodeEmbedder to be used to respond
 	// to a LOOKUP/CREATE/MKDIR/MKNOD opcode. If not set, use a
 	// LoopbackNode.
+	//
+	// Deprecated: use NodeWrapChilder instead.
 	NewNode func(rootData *LoopbackRoot, parent *Inode, name string, st *syscall.Stat_t) InodeEmbedder
 
 	// RootNode is the root of the Loopback. This must be set if
@@ -76,6 +79,16 @@ type LoopbackNode struct {
 	RootData *LoopbackRoot
 }
 
+// loopbackNodeEmbedder can only be implemented by the LoopbackNode
+// concrete type.
+type loopbackNodeEmbedder interface {
+	loopbackNode() *LoopbackNode
+}
+
+func (n *LoopbackNode) loopbackNode() *LoopbackNode {
+	return n
+}
+
 var _ = (NodeStatfser)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
@@ -101,9 +114,14 @@ func (n *LoopbackNode) root() *Inode {
 	return rootNode
 }
 
+// relativePath returns the path the node, relative to to the root directory
+func (n *LoopbackNode) relativePath() string {
+	return n.Path(n.root())
+}
+
+// path returns the absolute path to the node
 func (n *LoopbackNode) path() string {
-	path := n.Path(n.root())
-	return filepath.Join(n.RootData.Path, path)
+	return filepath.Join(n.RootData.Path, n.relativePath())
 }
 
 var _ = (NodeLookuper)((*LoopbackNode)(nil))
@@ -201,12 +219,21 @@ func (n *LoopbackNode) Unlink(ctx context.Context, name string) syscall.Errno {
 var _ = (NodeRenamer)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Rename(ctx context.Context, name string, newParent InodeEmbedder, newName string, flags uint32) syscall.Errno {
-	if flags&RENAME_EXCHANGE != 0 {
-		return n.renameExchange(name, newParent, newName)
+	e2, ok := newParent.(loopbackNodeEmbedder)
+	if !ok {
+		return syscall.EXDEV
+	}
+
+	if e2.loopbackNode().RootData != n.RootData {
+		return syscall.EXDEV
+	}
+
+	if flags != 0 {
+		return n.rename2(name, e2.loopbackNode(), newName, flags)
 	}
 
 	p1 := filepath.Join(n.path(), name)
-	p2 := filepath.Join(n.RootData.Path, newParent.EmbeddedInode().Path(nil), newName)
+	p2 := filepath.Join(e2.loopbackNode().path(), newName)
 
 	err := syscall.Rename(p1, p2)
 	return ToErrno(err)
@@ -236,18 +263,18 @@ func (n *LoopbackNode) Create(ctx context.Context, name string, flags uint32, mo
 	return ch, lf, 0, 0
 }
 
-func (n *LoopbackNode) renameExchange(name string, newparent InodeEmbedder, newName string) syscall.Errno {
+func (n *LoopbackNode) rename2(name string, newParent *LoopbackNode, newName string, flags uint32) syscall.Errno {
 	fd1, err := syscall.Open(n.path(), syscall.O_DIRECTORY, 0)
 	if err != nil {
 		return ToErrno(err)
 	}
 	defer syscall.Close(fd1)
-	p2 := filepath.Join(n.RootData.Path, newparent.EmbeddedInode().Path(nil))
+	p2 := newParent.path()
 	fd2, err := syscall.Open(p2, syscall.O_DIRECTORY, 0)
-	defer syscall.Close(fd2)
 	if err != nil {
 		return ToErrno(err)
 	}
+	defer syscall.Close(fd2)
 
 	var st syscall.Stat_t
 	if err := syscall.Fstat(fd1, &st); err != nil {
@@ -262,12 +289,11 @@ func (n *LoopbackNode) renameExchange(name string, newparent InodeEmbedder, newN
 		return ToErrno(err)
 	}
 
-	newinode, ok := newparent.(*LoopbackNode)
-	if (!ok || newinode.root() != newparent.EmbeddedInode()) && newinode.StableAttr().Ino != n.RootData.idFromStat(&st).Ino {
+	if (newParent.root() != newParent.EmbeddedInode()) && newParent.Inode.StableAttr().Ino != n.RootData.idFromStat(&st).Ino {
 		return syscall.EBUSY
 	}
 
-	return ToErrno(renameat.Renameat(fd1, name, fd2, newName, renameat.RENAME_EXCHANGE))
+	return ToErrno(renameat.Renameat(fd1, name, fd2, newName, uint(flags)))
 }
 
 var _ = (NodeSymlinker)((*LoopbackNode)(nil))
@@ -332,10 +358,11 @@ func (n *LoopbackNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
 
 var _ = (NodeOpener)((*LoopbackNode)(nil))
 
+// Symlink-safe through use of OpenSymlinkAware.
 func (n *LoopbackNode) Open(ctx context.Context, flags uint32) (fh FileHandle, fuseFlags uint32, errno syscall.Errno) {
-	flags = flags &^ syscall.O_APPEND
-	p := n.path()
-	f, err := syscall.Open(p, int(flags), 0)
+	flags = flags &^ (syscall.O_APPEND | fuse.FMODE_EXEC)
+
+	f, err := openat.OpenSymlinkAware(n.RootData.Path, n.relativePath(), int(flags), 0)
 	if err != nil {
 		return nil, 0, ToErrno(err)
 	}
@@ -410,7 +437,7 @@ func (n *LoopbackNode) Setattr(ctx context.Context, f FileHandle, in *fuse.SetAt
 			if gok {
 				sgid = int(gid)
 			}
-			if err := syscall.Chown(p, suid, sgid); err != nil {
+			if err := unix.Fchownat(unix.AT_FDCWD, p, suid, sgid, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 				return ToErrno(err)
 			}
 		}
@@ -487,11 +514,11 @@ var _ = (NodeCopyFileRanger)((*LoopbackNode)(nil))
 func (n *LoopbackNode) CopyFileRange(ctx context.Context, fhIn FileHandle,
 	offIn uint64, out *Inode, fhOut FileHandle, offOut uint64,
 	len uint64, flags uint64) (uint32, syscall.Errno) {
-	lfIn, ok := fhIn.(*loopbackFile)
+	lfIn, ok := fhIn.(*LoopbackFile)
 	if !ok {
 		return 0, unix.ENOTSUP
 	}
-	lfOut, ok := fhOut.(*loopbackFile)
+	lfOut, ok := fhOut.(*LoopbackFile)
 	if !ok {
 		return 0, unix.ENOTSUP
 	}

@@ -97,6 +97,7 @@ type rawBridge struct {
 	//
 	// A simple incrementing counter is used as the NodeID (see `nextNodeID`).
 	kernelNodeIds map[uint64]*Inode
+
 	// nextNodeID is the next free NodeID. Increment after copying the value.
 	nextNodeId uint64
 	// nodeCountHigh records the highest number of entries we had in the
@@ -285,24 +286,26 @@ func (b *rawBridge) setAttrTimeout(out *fuse.AttrOut) {
 
 // NewNodeFS creates a node based filesystem based on the
 // InodeEmbedder instance for the root of the tree.
+// If nil is given as opts, default settings are
+// applied, which are 1 second entry and attribute timeout.
 func NewNodeFS(root InodeEmbedder, opts *Options) fuse.RawFileSystem {
+	if opts == nil {
+		oneSec := time.Second
+		opts = &Options{
+			EntryTimeout: &oneSec,
+			AttrTimeout:  &oneSec,
+		}
+	}
 	bridge := &rawBridge{
 		automaticIno: opts.FirstAutomaticIno,
 		server:       opts.ServerCallbacks,
 		nextNodeId:   2, // the root node has nodeid 1
 		stableAttrs:  make(map[StableAttr]*Inode),
+		options:      *opts,
 	}
 
 	if bridge.automaticIno == 0 {
 		bridge.automaticIno = 1 << 63
-	}
-
-	if opts != nil {
-		bridge.options = *opts
-	} else {
-		oneSec := time.Second
-		bridge.options.EntryTimeout = &oneSec
-		bridge.options.AttrTimeout = &oneSec
 	}
 
 	stableAttr := StableAttr{
@@ -484,7 +487,9 @@ func (b *rawBridge) Create(cancel <-chan struct{}, input *fuse.CreateIn, name st
 	}
 
 	child, fe := b.addNewChild(parent, name, child, f, input.Flags|syscall.O_CREAT|syscall.O_EXCL, &out.EntryOut)
-	out.Fh = uint64(fe.fh)
+	if fe != nil {
+		out.Fh = uint64(fe.fh)
+	}
 	out.OpenFlags = flags
 
 	b.addBackingID(child, f, &out.OpenOut)
@@ -921,6 +926,9 @@ func (b *rawBridge) Release(cancel <-chan struct{}, input *fuse.ReleaseIn) {
 
 func (b *rawBridge) ReleaseDir(input *fuse.ReleaseIn) {
 	n, f := b.releaseFileEntry(input.NodeId, input.Fh)
+	if f == nil {
+		return
+	}
 	f.wg.Wait()
 
 	if frd, ok := f.file.(FileReleasedirer); ok {
@@ -938,6 +946,9 @@ func (b *rawBridge) releaseFileEntry(nid uint64, fh uint64) (*Inode, *fileEntry)
 	defer b.mu.Unlock()
 
 	n := b.kernelNodeIds[nid]
+	if n == nil {
+		log.Panicf("releaseFileEntry: unknown node %d", nid)
+	}
 	var entry *fileEntry
 	if fh > 0 {
 		last := len(n.openFiles) - 1
@@ -1190,7 +1201,13 @@ func (b *rawBridge) readDirMaybeLookup(cancel <-chan struct{}, input *fuse.ReadI
 			continue
 		}
 
-		child, errno := b.lookup(ctx, n, de.Name, entryOut)
+		var child *Inode
+		if fileLookupper, ok := f.file.(FileLookuper); ok {
+			child, errno = fileLookupper.Lookup(ctx, de.Name, entryOut)
+		} else {
+			child, errno = b.lookup(ctx, n, de.Name, entryOut)
+		}
+
 		if errno != 0 {
 			if b.options.NegativeTimeout != nil {
 				entryOut.SetEntryTimeout(*b.options.NegativeTimeout)
@@ -1198,6 +1215,7 @@ func (b *rawBridge) readDirMaybeLookup(cancel <-chan struct{}, input *fuse.ReadI
 				// TODO: maybe simply not produce the dirent here?
 				// test?
 			}
+			// TODO: should break?
 		} else {
 			child, _ = b.addNewChild(n, de.Name, child, nil, 0, entryOut)
 			child.setEntryOut(entryOut)
@@ -1253,6 +1271,23 @@ func (b *rawBridge) CopyFileRange(cancel <-chan struct{}, in *fuse.CopyFileRange
 	return sz, errnoToStatus(errno)
 }
 
+func (b *rawBridge) Ioctl(cancel <-chan struct{}, in *fuse.IoctlIn, inbuf []byte, out *fuse.IoctlOut, outbuf []byte) (code fuse.Status) {
+	n, f := b.inode(in.NodeId, in.Fh)
+	if nio, ok := n.ops.(NodeIoctler); ok {
+		ctx := &fuse.Context{Caller: in.Caller, Cancel: cancel}
+		result, errno := nio.Ioctl(ctx, f.file, in.Cmd, in.Arg, inbuf, outbuf)
+		out.Result = result
+		return errnoToStatus(errno)
+	}
+	if fio, ok := f.file.(FileIoctler); ok {
+		ctx := &fuse.Context{Caller: in.Caller, Cancel: cancel}
+		result, errno := fio.Ioctl(ctx, in.Cmd, in.Arg, inbuf, outbuf)
+		out.Result = result
+		return errnoToStatus(errno)
+	}
+	return fuse.Status(syscall.ENOTTY)
+}
+
 func (b *rawBridge) Lseek(cancel <-chan struct{}, in *fuse.LseekIn, out *fuse.LseekOut) fuse.Status {
 	n, f := b.inode(in.NodeId, in.Fh)
 
@@ -1291,4 +1326,10 @@ func (b *rawBridge) Lseek(cancel <-chan struct{}, in *fuse.LseekIn, out *fuse.Ls
 	}
 
 	return fuse.ENOTSUP
+}
+
+func (b *rawBridge) OnUnmount() {
+	if of, ok := b.root.ops.(NodeOnForgetter); ok {
+		of.OnForget()
+	}
 }

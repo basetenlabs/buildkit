@@ -24,6 +24,11 @@ type ImageCommitOpts struct {
 	ForceInlineAttestations bool   // force inline attestations to be attached
 	RewriteTimestamp        bool   // rewrite timestamps in layers to match the epoch
 	EagerExport             string // "compress" or "push" — layers already compressed by eager pipeline
+
+	SOCI             bool   // generate & push a SOCI v2 index to a sibling "-soci" ref
+	SOCIName         string // explicit ref for the SOCI index; default derives "<name>-soci"
+	SOCISpanSize     int64  // soci span size in bytes (0 = soci default, 4 MiB)
+	SOCIMinLayerSize int64  // skip ztoc generation for layers smaller than this (bytes)
 }
 
 func (c *ImageCommitOpts) Load(ctx context.Context, opt map[string]string) (map[string]string, error) {
@@ -59,6 +64,14 @@ func (c *ImageCommitOpts) Load(ctx context.Context, opt map[string]string) (map[
 			err = parseBool(&c.RefCfg.PreferNonDistributable, k, v)
 		case exptypes.OptKeyRewriteTimestamp:
 			err = parseBool(&c.RewriteTimestamp, k, v)
+		case exptypes.OptKeySOCI:
+			err = parseBoolWithDefault(&c.SOCI, k, v, true)
+		case exptypes.OptKeySOCIName:
+			c.SOCIName = v
+		case exptypes.OptKeySOCISpanSize:
+			c.SOCISpanSize, err = strconv.ParseInt(v, 10, 64)
+		case exptypes.OptKeySOCIMinLayerSize:
+			c.SOCIMinLayerSize, err = strconv.ParseInt(v, 10, 64)
 		default:
 			rest[k] = v
 		}
@@ -73,6 +86,11 @@ func (c *ImageCommitOpts) Load(ctx context.Context, opt map[string]string) (map[
 	}
 	if c.OCIArtifact && !c.OCITypes {
 		c.EnableOCITypes(ctx, "oci-artifact")
+	}
+	// soci-snapshotter's Convert walks the image assuming OCI media types; a docker
+	// schema2 manifest makes it fail. Force OCI types when SOCI is on.
+	if c.SOCI && !c.OCITypes {
+		c.EnableOCITypes(ctx, "soci")
 	}
 
 	c.Annotations = c.Annotations.Merge(as)

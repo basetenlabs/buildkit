@@ -94,6 +94,25 @@ var (
 	//   push    — compress AND push layer blobs as vertices complete; only push manifest at finalize
 	OptKeyEagerExport ImageExporterOptKey = "eager-export"
 
+	// Generate a SOCI (Seekable OCI) v2 index for the pushed image and push it
+	// to a sibling "-soci" ref so soci-snapshotter can lazily pull layers. The
+	// canonical image is pushed unchanged; the SOCI index is additive and shares
+	// layer blobs. Forces oci-mediatypes. Requires push=true.
+	// Value: bool <true|false>
+	OptKeySOCI ImageExporterOptKey = "soci"
+
+	// Explicit ref to push the SOCI index to. Defaults to "<name>-soci".
+	// Value: string
+	OptKeySOCIName ImageExporterOptKey = "soci-name"
+
+	// SOCI span size in bytes (ztoc granularity). Default 4 MiB.
+	// Value: int
+	OptKeySOCISpanSize ImageExporterOptKey = "soci-span-size"
+
+	// Skip ztoc generation for layers smaller than this many bytes. Default 10 MiB.
+	// Value: int
+	OptKeySOCIMinLayerSize ImageExporterOptKey = "soci-min-layer-size"
+
 	// When pulling base image layers, check the push (destination) registry
 	// first and pull from there if the layer exists. Falls back to the origin
 	// registry transparently. Useful when the push registry is closer than

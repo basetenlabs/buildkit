@@ -195,6 +195,12 @@ func (e *imageExporter) Resolve(ctx context.Context, id int, opt map[string]stri
 			i.meta[k] = []byte(v)
 		}
 	}
+
+	// SOCI produces a side artifact at a sibling registry ref, so it only makes
+	// sense when pushing. Fail fast rather than at export time.
+	if i.opts.SOCI && !i.push {
+		return nil, errors.Errorf("%s requires %s=true", exptypes.OptKeySOCI, exptypes.OptKeyPush)
+	}
 	return i, nil
 }
 
@@ -304,6 +310,24 @@ func (e *imageExporterInstance) Export(ctx context.Context, src *exporter.Source
 		}
 	}
 
+	// Generate the SOCI v2 index once for the committed image. It is additive:
+	// it re-serializes the image manifest with a soci index-digest annotation and
+	// bundles a SOCI index, sharing the image's layer blobs. It is pushed per target
+	// name to a sibling "-soci" ref below. See export_soci.go.
+	var sociDesc *ocispecs.Descriptor
+	if e.opts.SOCI { // Resolve guarantees e.push is set when SOCI is enabled
+		prov, _, err := e.collectRemotes(ctx, src, sessionID, "soci")
+		if err != nil {
+			return nil, nil, err
+		}
+		sociDone := progress.OneOff(ctx, "generating SOCI index")
+		sociDesc, err = buildSOCIIndex(ctx, prov, e.opt.ImageWriter.ContentStore(), *desc, &e.opts)
+		if err != nil {
+			return nil, nil, sociDone(errors.Wrap(err, "generating SOCI index"))
+		}
+		sociDone(nil)
+	}
+
 	if e.opts.ImageName != "" {
 		targetNames := strings.Split(e.opts.ImageName, ",")
 		for _, targetName := range targetNames {
@@ -403,6 +427,23 @@ func (e *imageExporterInstance) Export(ctx context.Context, src *exporter.Source
 					}
 					return nil, nil, errors.Wrapf(err, "failed to push %v", targetName)
 				}
+				if sociDesc != nil {
+					sociRef, err := sociRefForName(targetName, &e.opts)
+					if err != nil {
+						return nil, nil, err
+					}
+					prov, _, err := e.collectRemotes(ctx, src, sessionID, "soci push")
+					if err != nil {
+						return nil, nil, err
+					}
+					sociPushDone := progress.OneOff(ctx, "pushing SOCI index to "+sociRef)
+					if err := push.Push(ctx, e.opt.SessionManager, sessionID, prov, e.opt.ImageWriter.ContentStore(), sociDesc.Digest, sociRef, e.insecure, e.opt.RegistryHosts, e.pushByDigest, false, nil); err != nil {
+						return nil, nil, sociPushDone(errors.Wrapf(err, "failed to push SOCI index %v", sociRef))
+					}
+					sociPushDone(nil)
+					resp[exptypes.ExporterSOCIImageNameKey] = sociRef
+					resp[exptypes.ExporterSOCIDigestKey] = sociDesc.Digest.String()
+				}
 			}
 		}
 		resp[exptypes.ExporterImageNameKey] = e.opts.ImageName
@@ -423,7 +464,12 @@ func (e *imageExporterInstance) Export(ctx context.Context, src *exporter.Source
 	return resp, nil, nil
 }
 
-func (e *imageExporterInstance) pushImage(ctx context.Context, src *exporter.Source, sessionID string, targetName string, dgst digest.Digest) error {
+// collectRemotes builds a content provider over the source refs' layer blobs
+// (which may be lazy) layered on top of the worker content store, plus the layer
+// annotations. The same provider serves both the canonical image push and the SOCI
+// index push, since the worker store base also covers the manifest/config and any
+// blobs SOCI wrote (ztocs, index, re-serialized manifest).
+func (e *imageExporterInstance) collectRemotes(ctx context.Context, src *exporter.Source, sessionID string, what string) (*contentutil.MultiProvider, map[digest.Digest]map[string]string, error) {
 	var refs []cache.ImmutableRef
 	if src.Ref != nil {
 		refs = append(refs, src.Ref)
@@ -441,15 +487,23 @@ func (e *imageExporterInstance) pushImage(ctx context.Context, src *exporter.Sou
 		remotes, err := ref.GetRemotes(ctx, false, e.opts.RefCfg, false, session.NewGroup(sessionID))
 		if err != nil {
 			if errors.Is(err, cache.ErrNoBlobs) {
-				bklog.G(ctx).Warnf("pushImage: ErrNoBlobs for top-level ref=%s targetName=%s", ref.ID(), targetName)
+				bklog.G(ctx).Warnf("%s: ErrNoBlobs for top-level ref=%s", what, ref.ID())
 			}
-			return errors.Wrapf(err, "pushImage: top-level ref %s", ref.ID())
+			return nil, nil, errors.Wrapf(err, "%s: top-level ref %s", what, ref.ID())
 		}
 		remote := remotes[0]
 		for _, desc := range remote.Descriptors {
 			mprovider.Add(desc.Digest, remote.Provider)
 			addAnnotations(annotations, desc)
 		}
+	}
+	return mprovider, annotations, nil
+}
+
+func (e *imageExporterInstance) pushImage(ctx context.Context, src *exporter.Source, sessionID string, targetName string, dgst digest.Digest) error {
+	mprovider, annotations, err := e.collectRemotes(ctx, src, sessionID, "pushImage")
+	if err != nil {
+		return err
 	}
 	return push.Push(ctx, e.opt.SessionManager, sessionID, mprovider, e.opt.ImageWriter.ContentStore(), dgst, targetName, e.insecure, e.opt.RegistryHosts, e.pushByDigest, e.eagerExport == exptypes.OptValEagerExportPush, annotations)
 }

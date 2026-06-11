@@ -98,10 +98,24 @@ ARG VERIFYFLAGS="--static"
 ARG CGO_ENABLED=0
 ARG BUILDKIT_DEBUG
 ARG GOGCFLAGS=${BUILDKIT_DEBUG:+"all=-N -l"}
+# The `soci` build tag enables native SOCI v2 index generation, which pulls in
+# soci-snapshotter's ztoc package — that links zlib statically via cgo (SOCI.md §7).
+# Install the C toolchain + static zlib for the *target* arch only when soci is
+# requested; the default build keeps CGO_ENABLED=0 and stays purely static.
+RUN case " ${BUILDKITD_TAGS} " in \
+      *" soci "*) set -ex; xx-apk add --no-cache musl-dev gcc zlib-dev zlib-static ;; \
+    esac
 RUN --mount=target=. --mount=target=/root/.cache,type=cache \
   --mount=target=/go/pkg/mod,type=cache \
   --mount=source=/tmp/.ldflags,target=/tmp/.ldflags,from=buildkit-version <<EOT
   set -ex
+  case " ${BUILDKITD_TAGS} " in
+    *" soci "*)
+      # soci's ztoc cgo hardcodes `-L<srcdir>/../out -l:libz.a` (that out/ dir is not
+      # vendored); point the linker at the target sysroot's static zlib instead.
+      export CGO_ENABLED=1 CGO_LDFLAGS="-L$(xx-info sysroot)usr/lib"
+      ;;
+  esac
   xx-go build ${GOBUILDFLAGS} -gcflags="${GOGCFLAGS}" -ldflags "$(cat /tmp/.ldflags) -extldflags '-static'" -tags "osusergo netgo static_build seccomp ${BUILDKITD_TAGS}" -o /usr/bin/buildkitd ./cmd/buildkitd
   xx-verify ${VERIFYFLAGS} /usr/bin/buildkitd
 

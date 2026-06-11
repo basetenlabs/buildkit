@@ -16,6 +16,11 @@ const (
 	ExporterImageDescriptorKey   = "containerimage.descriptor"
 	ExporterImageBaseConfigKey   = "containerimage.base.config"
 	ExporterPlatformsKey         = "refs.platforms"
+
+	// ExporterSOCIImageNameKey is the ref the SOCI index was pushed to.
+	ExporterSOCIImageNameKey = "image.soci.name"
+	// ExporterSOCIDigestKey is the digest of the SOCI OCI index.
+	ExporterSOCIDigestKey = "containerimage.soci.digest"
 )
 
 // KnownRefMetadataKeys are the subset of exporter keys that can be suffixed by

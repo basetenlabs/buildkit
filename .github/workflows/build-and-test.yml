@@ -4,9 +4,11 @@ on:
   pull_request:
     branches:
       - v0.22-base
+      - development
   push:
     branches:
       - v0.22-base
+      - development
   workflow_dispatch:
     inputs:
       test_scope:
@@ -179,10 +181,19 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Generate tag
         id: tag
+        # Production (v0.22-base) → v0.22.0-<sha>-<ts>; development → a `dev-`
+        # marker is inserted so prod and dev images coexist in baseten/buildkit
+        # without prod consumers ever resolving a development build. ref_name is
+        # the pushed/dispatched branch, so dispatch inherits its branch's stream.
         run: |
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
           TIMESTAMP=$(date -u +%Y%m%d%H%M%S)
-          echo "tag=v0.22.0-${SHORT_SHA}-${TIMESTAMP}" >> $GITHUB_OUTPUT
+          if [ "${{ github.ref_name }}" = "development" ]; then
+            MARKER="dev-"
+          else
+            MARKER=""
+          fi
+          echo "tag=v0.22.0-${MARKER}${SHORT_SHA}-${TIMESTAMP}" >> $GITHUB_OUTPUT
       - name: Build and push
         uses: docker/build-push-action@v6
         with:

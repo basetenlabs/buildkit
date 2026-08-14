@@ -50,14 +50,10 @@ import (
 
 var additionalAnnotations = append(append(compression.EStargzAnnotations, obdlabel.OverlayBDAnnotations...), labels.LabelUncompressed)
 
-func isShortRead(err error) bool {
-	return errors.Is(err, io.ErrUnexpectedEOF)
-}
-
 // Lease-delete only. ContentStore.Delete is forbidden; blob cleanup is
 // left to the daemon's existing GC. TryLock: GetByBlob already holds cm.mu.
 func (sr *immutableRef) evictOnShortRead(ctx context.Context, cause error, managerLocked bool) {
-	if !isShortRead(cause) {
+	if !errors.Is(cause, io.ErrUnexpectedEOF) {
 		return
 	}
 	if !managerLocked {

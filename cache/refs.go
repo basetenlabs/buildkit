@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -48,6 +49,36 @@ import (
 )
 
 var additionalAnnotations = append(append(compression.EStargzAnnotations, obdlabel.OverlayBDAnnotations...), labels.LabelUncompressed)
+
+func isShortRead(err error) bool {
+	return errors.Is(err, io.ErrUnexpectedEOF)
+}
+
+// Lease-delete only (ContentStore.Delete is forbidden). TryLock: GetByBlob
+// already holds cm.mu. Caller GCs after dropping that lock.
+func (sr *immutableRef) evictOnShortRead(ctx context.Context, cause error, managerLocked bool) {
+	if !isShortRead(cause) {
+		return
+	}
+	if !managerLocked {
+		if !sr.cm.mu.TryLock() {
+			return
+		}
+		defer sr.cm.mu.Unlock()
+	}
+	if err := sr.remove(ctx, true); err != nil {
+		bklog.G(ctx).Errorf("failed to evict short-read record %s: %+v", sr.ID(), err)
+	}
+}
+
+func (cm *cacheManager) gcAfterShortRead(ctx context.Context) {
+	if cm.GarbageCollect == nil {
+		return
+	}
+	if _, err := cm.GarbageCollect(ctx); err != nil {
+		bklog.G(ctx).Errorf("gc after short-read evict: %+v", err)
+	}
+}
 
 func parallelExtractEnabled() bool {
 	v, _ := strconv.ParseBool(os.Getenv("BUILDKIT_PARALLEL_EXTRACT"))
@@ -1110,13 +1141,21 @@ func (sr *immutableRef) Extract(ctx context.Context, s session.Group) (rerr erro
 			}
 			if len(needsExtract) > 0 {
 				bklog.G(ctx).Infof("parallel extract: extracting %d/%d layers in parallel", len(needsExtract), len(chain))
-				return sr.parallelExtractLayers(ctx, chain, needsExtract, s)
+				err := sr.parallelExtractLayers(ctx, chain, needsExtract, s)
+				if isShortRead(err) {
+					sr.cm.gcAfterShortRead(ctx)
+				}
+				return err
 			}
 			return nil
 		}
 	}
 
-	return sr.unlazy(ctx, sr.descHandlers, sr.progress, s, true, false)
+	err := sr.unlazy(ctx, sr.descHandlers, sr.progress, s, true, false)
+	if isShortRead(err) {
+		sr.cm.gcAfterShortRead(ctx)
+	}
+	return err
 }
 
 func (sr *immutableRef) withRemoteSnapshotLabelsStargzMode(ctx context.Context, s session.Group, f func()) error {
@@ -1491,6 +1530,7 @@ func (sr *immutableRef) unlazyLayer(ctx context.Context, dhs DescHandlers, pg pr
 	_, err = sr.cm.Applier.Apply(ctx, desc, mounts)
 	if err != nil {
 		unmount()
+		sr.evictOnShortRead(ctx, err, false)
 		return err
 	}
 
@@ -1598,6 +1638,7 @@ func (sr *immutableRef) parallelExtractLayers(ctx context.Context, chain []*immu
 				Options: []string{"upperdir=" + fsDir},
 			}}
 			if _, err := ref.cm.Applier.Apply(egctx, desc, mounts); err != nil {
+				ref.evictOnShortRead(egctx, err, false)
 				return err
 			}
 

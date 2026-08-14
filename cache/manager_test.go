@@ -574,6 +574,102 @@ func TestSnapshotExtract(t *testing.T) {
 	checkNumBlobs(ctx, t, co.cs, 0)
 }
 
+// Failed pull must not leave a lazy record (CACHED hit, then retry poison).
+func TestGetByBlobUnlazyShortReadDropsRecord(t *testing.T) {
+	t.Parallel()
+	ctx := namespaces.WithNamespace(context.Background(), "buildkit-test")
+
+	snapshotter, err := native.NewSnapshotter(filepath.Join(t.TempDir(), "snapshots"))
+	require.NoError(t, err)
+
+	co, cleanup, err := newCacheManager(ctx, t, cmOpt{
+		snapshotter:     snapshotter,
+		snapshotterName: "native",
+	})
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+	cm := co.manager
+
+	blob, desc, err := mapToBlob(map[string]string{"foo": "bar"}, true)
+	require.NoError(t, err)
+	require.Greater(t, len(blob), 2)
+
+	dhs := DescHandlers{
+		desc.Digest: &DescHandler{
+			Provider: func(session.Group) content.Provider {
+				return bytesProvider{b: blob[:len(blob)/2]}
+			},
+		},
+	}
+
+	_, err = cm.GetByBlob(ctx, desc, nil, dhs, session.NewGroup())
+	require.Error(t, err)
+	require.True(t, errors.Is(err, io.ErrUnexpectedEOF), "got %v", err)
+
+	checkDiskUsage(ctx, t, cm, 0, 0)
+
+	dhs[desc.Digest] = &DescHandler{
+		Provider: func(session.Group) content.Provider {
+			return bytesProvider{b: blob}
+		},
+	}
+	snap, err := cm.GetByBlob(ctx, desc, nil, dhs, session.NewGroup())
+	require.NoError(t, err)
+	require.NoError(t, snap.Release(ctx))
+}
+
+// Truncated local blob must be evicted so a re-seeded Extract can succeed.
+func TestExtractTruncatedBlobEvictsAndRecovers(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Depends on unimplemented containerd bind-mount support on Windows")
+	}
+
+	t.Parallel()
+	ctx := namespaces.WithNamespace(context.Background(), "buildkit-test")
+
+	tmpdir := t.TempDir()
+	snapshotter, err := native.NewSnapshotter(filepath.Join(tmpdir, "snapshots"))
+	require.NoError(t, err)
+
+	co, cleanup, err := newCacheManager(ctx, t, cmOpt{
+		snapshotter:     snapshotter,
+		snapshotterName: "native",
+		tmpdir:          tmpdir,
+	})
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+	cm := co.manager
+
+	blob, desc, err := mapToBlob(map[string]string{"foo": "bar"}, true)
+	require.NoError(t, err)
+	require.Greater(t, len(blob), 2)
+
+	err = content.WriteBlob(ctx, co.cs, "ref1", bytes.NewBuffer(blob), desc)
+	require.NoError(t, err)
+
+	snap, err := cm.GetByBlob(ctx, desc, nil)
+	require.NoError(t, err)
+
+	truncateStoreBlob(t, tmpdir, desc.Digest)
+
+	err = snap.Extract(ctx, nil)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, io.ErrUnexpectedEOF) || strings.Contains(err.Error(), "unexpected EOF"), "got %v", err)
+	require.NoError(t, snap.Release(ctx))
+
+	checkDiskUsage(ctx, t, cm, 0, 0)
+
+	_, err = co.cs.Info(ctx, desc.Digest)
+	require.True(t, errors.Is(err, cerrdefs.ErrNotFound), "poisoned blob still in content store: %v", err)
+
+	err = content.WriteBlob(ctx, co.cs, "ref1", bytes.NewBuffer(blob), desc)
+	require.NoError(t, err)
+	snap2, err := cm.GetByBlob(ctx, desc, nil)
+	require.NoError(t, err)
+	require.NoError(t, snap2.Extract(ctx, nil))
+	require.NoError(t, snap2.Release(ctx))
+}
+
 func TestExtractOnMutable(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Depends on unimplemented containerd bind-mount support on Windows")
@@ -2577,6 +2673,43 @@ func TestCalculateKeepBytes(t *testing.T) {
 			require.Equal(t, tc.result, calculateKeepBytes(tc.totalSize, tc.stat, tc.opt))
 		})
 	}
+}
+
+type bytesProvider struct {
+	b []byte
+}
+
+func (p bytesProvider) ReaderAt(_ context.Context, _ ocispecs.Descriptor) (content.ReaderAt, error) {
+	return bytesReaderAt{b: p.b}, nil
+}
+
+type bytesReaderAt struct {
+	b []byte
+}
+
+func (r bytesReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	if off >= int64(len(r.b)) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.b[off:])
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+func (r bytesReaderAt) Close() error { return nil }
+
+func (r bytesReaderAt) Size() int64 { return int64(len(r.b)) }
+
+func truncateStoreBlob(t *testing.T, root string, dgst digest.Digest) {
+	t.Helper()
+	path := filepath.Join(root, "blobs", dgst.Algorithm().String(), dgst.Encoded())
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	require.Greater(t, info.Size(), int64(1))
+	require.NoError(t, os.Chmod(path, 0644))
+	require.NoError(t, os.Truncate(path, info.Size()/2))
 }
 
 func checkDiskUsage(ctx context.Context, t *testing.T, cm Manager, inuse, unused int) {

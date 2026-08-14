@@ -50,10 +50,19 @@ import (
 
 var additionalAnnotations = append(append(compression.EStargzAnnotations, obdlabel.OverlayBDAnnotations...), labels.LabelUncompressed)
 
+func dropLazyRecordOnShortReadEnabled() bool {
+	v, _ := strconv.ParseBool(os.Getenv("BUILDKIT_DROP_LAZY_RECORD_ON_SHORT_READ"))
+	return v
+}
+
 // Lease-delete only. ContentStore.Delete is forbidden; blob cleanup is
 // left to the daemon's existing GC. TryLock: GetByBlob already holds cm.mu.
-func (sr *immutableRef) evictOnShortRead(ctx context.Context, cause error, managerLocked bool) {
+func (sr *immutableRef) dropLazyRecordOnShortRead(ctx context.Context, cause error, managerLocked bool) {
 	if !errors.Is(cause, io.ErrUnexpectedEOF) {
+		return
+	}
+	if !dropLazyRecordOnShortReadEnabled() {
+		bklog.G(ctx).Warnf("lazy-record drop on short-read disabled, leaving record %s", sr.ID())
 		return
 	}
 	if !managerLocked {
@@ -63,7 +72,7 @@ func (sr *immutableRef) evictOnShortRead(ctx context.Context, cause error, manag
 		defer sr.cm.mu.Unlock()
 	}
 	if err := sr.remove(ctx, true); err != nil {
-		bklog.G(ctx).Errorf("failed to evict short-read record %s: %+v", sr.ID(), err)
+		bklog.G(ctx).Errorf("failed to drop short-read lazy record %s: %+v", sr.ID(), err)
 	}
 }
 
@@ -1509,7 +1518,7 @@ func (sr *immutableRef) unlazyLayer(ctx context.Context, dhs DescHandlers, pg pr
 	_, err = sr.cm.Applier.Apply(ctx, desc, mounts)
 	if err != nil {
 		unmount()
-		sr.evictOnShortRead(ctx, err, false)
+		sr.dropLazyRecordOnShortRead(ctx, err, false)
 		return err
 	}
 
@@ -1617,7 +1626,7 @@ func (sr *immutableRef) parallelExtractLayers(ctx context.Context, chain []*immu
 				Options: []string{"upperdir=" + fsDir},
 			}}
 			if _, err := ref.cm.Applier.Apply(egctx, desc, mounts); err != nil {
-				ref.evictOnShortRead(egctx, err, false)
+				ref.dropLazyRecordOnShortRead(egctx, err, false)
 				return err
 			}
 

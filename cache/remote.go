@@ -367,7 +367,7 @@ func (p lazyRefProvider) Unlazy(ctx context.Context) error {
 				"UNLAZY-FETCH-ERR ref=%s digest=%s dh.Ref=%q imageRefs=%v err=%v",
 				p.ref.ID(), p.desc.Digest, p.dh.Ref, p.ref.getImageRefs(), err,
 			)
-			p.ref.evictOnShortRead(ctx, err, false)
+			p.ref.dropLazyRecordOnShortRead(ctx, err, false)
 			return struct{}{}, err
 		}
 

@@ -576,7 +576,7 @@ func TestSnapshotExtract(t *testing.T) {
 
 // Failed pull must not leave a lazy record (CACHED hit, then retry poison).
 func TestGetByBlobUnlazyShortReadDropsRecord(t *testing.T) {
-	t.Parallel()
+	t.Setenv("BUILDKIT_DROP_LAZY_RECORD_ON_SHORT_READ", "1")
 	ctx := namespaces.WithNamespace(context.Background(), "buildkit-test")
 
 	snapshotter, err := native.NewSnapshotter(filepath.Join(t.TempDir(), "snapshots"))
@@ -618,13 +618,48 @@ func TestGetByBlobUnlazyShortReadDropsRecord(t *testing.T) {
 	require.NoError(t, snap.Release(ctx))
 }
 
+func TestGetByBlobUnlazyShortReadKeepsRecordWhenDisabled(t *testing.T) {
+	t.Setenv("BUILDKIT_DROP_LAZY_RECORD_ON_SHORT_READ", "0")
+	ctx := namespaces.WithNamespace(context.Background(), "buildkit-test")
+
+	snapshotter, err := native.NewSnapshotter(filepath.Join(t.TempDir(), "snapshots"))
+	require.NoError(t, err)
+
+	co, cleanup, err := newCacheManager(ctx, t, cmOpt{
+		snapshotter:     snapshotter,
+		snapshotterName: "native",
+	})
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+	cm := co.manager
+
+	blob, desc, err := mapToBlob(map[string]string{"foo": "bar"}, true)
+	require.NoError(t, err)
+	require.Greater(t, len(blob), 2)
+
+	dhs := DescHandlers{
+		desc.Digest: &DescHandler{
+			Provider: func(session.Group) content.Provider {
+				return bytesProvider{b: blob[:len(blob)/2]}
+			},
+		},
+	}
+
+	_, err = cm.GetByBlob(ctx, desc, nil, dhs, session.NewGroup())
+	require.Error(t, err)
+	require.True(t, errors.Is(err, io.ErrUnexpectedEOF), "got %v", err)
+
+	// GetByBlob returns the error without Release, so the lazy record stays in-use.
+	checkDiskUsage(ctx, t, cm, 1, 0)
+}
+
 // Truncated local blob must be evicted so a re-seeded Extract can succeed.
 func TestExtractTruncatedBlobEvictsAndRecovers(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Depends on unimplemented containerd bind-mount support on Windows")
 	}
 
-	t.Parallel()
+	t.Setenv("BUILDKIT_DROP_LAZY_RECORD_ON_SHORT_READ", "1")
 	ctx := namespaces.WithNamespace(context.Background(), "buildkit-test")
 
 	tmpdir := t.TempDir()

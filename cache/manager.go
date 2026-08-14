@@ -323,7 +323,7 @@ func (cm *cacheManager) GetByBlob(ctx context.Context, desc ocispecs.Descriptor,
 	ref := rec.ref(true, descHandlers, nil)
 	if s := unlazySessionOf(opts...); s != nil {
 		if err := ref.unlazy(ctx, ref.descHandlers, ref.progress, s, true, false); err != nil {
-			ref.evictOnShortRead(ctx, err, true)
+			ref.dropLazyRecordOnShortRead(ctx, err, true)
 			return nil, err
 		}
 	}

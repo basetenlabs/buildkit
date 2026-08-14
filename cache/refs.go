@@ -54,8 +54,8 @@ func isShortRead(err error) bool {
 	return errors.Is(err, io.ErrUnexpectedEOF)
 }
 
-// Lease-delete only (ContentStore.Delete is forbidden). TryLock: GetByBlob
-// already holds cm.mu. Caller GCs after dropping that lock.
+// Lease-delete only. ContentStore.Delete is forbidden; blob cleanup is
+// left to the daemon's existing GC. TryLock: GetByBlob already holds cm.mu.
 func (sr *immutableRef) evictOnShortRead(ctx context.Context, cause error, managerLocked bool) {
 	if !isShortRead(cause) {
 		return
@@ -68,15 +68,6 @@ func (sr *immutableRef) evictOnShortRead(ctx context.Context, cause error, manag
 	}
 	if err := sr.remove(ctx, true); err != nil {
 		bklog.G(ctx).Errorf("failed to evict short-read record %s: %+v", sr.ID(), err)
-	}
-}
-
-func (cm *cacheManager) gcAfterShortRead(ctx context.Context) {
-	if cm.GarbageCollect == nil {
-		return
-	}
-	if _, err := cm.GarbageCollect(ctx); err != nil {
-		bklog.G(ctx).Errorf("gc after short-read evict: %+v", err)
 	}
 }
 
@@ -1141,21 +1132,13 @@ func (sr *immutableRef) Extract(ctx context.Context, s session.Group) (rerr erro
 			}
 			if len(needsExtract) > 0 {
 				bklog.G(ctx).Infof("parallel extract: extracting %d/%d layers in parallel", len(needsExtract), len(chain))
-				err := sr.parallelExtractLayers(ctx, chain, needsExtract, s)
-				if isShortRead(err) {
-					sr.cm.gcAfterShortRead(ctx)
-				}
-				return err
+				return sr.parallelExtractLayers(ctx, chain, needsExtract, s)
 			}
 			return nil
 		}
 	}
 
-	err := sr.unlazy(ctx, sr.descHandlers, sr.progress, s, true, false)
-	if isShortRead(err) {
-		sr.cm.gcAfterShortRead(ctx)
-	}
-	return err
+	return sr.unlazy(ctx, sr.descHandlers, sr.progress, s, true, false)
 }
 
 func (sr *immutableRef) withRemoteSnapshotLabelsStargzMode(ctx context.Context, s session.Group, f func()) error {

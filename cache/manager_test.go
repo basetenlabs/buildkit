@@ -659,6 +659,9 @@ func TestExtractTruncatedBlobEvictsAndRecovers(t *testing.T) {
 
 	checkDiskUsage(ctx, t, cm, 0, 0)
 
+	// Blob stays until the existing daemon GC. Simulate that here.
+	_, err = cm.(*cacheManager).GarbageCollect(ctx)
+	require.NoError(t, err)
 	_, err = co.cs.Info(ctx, desc.Digest)
 	require.True(t, errors.Is(err, cerrdefs.ErrNotFound), "poisoned blob still in content store: %v", err)
 
